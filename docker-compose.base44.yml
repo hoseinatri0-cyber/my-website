@@ -1,0 +1,96 @@
+name: nexora
+
+services:
+  # One-shot dependency installer. Installs into a named volume so the bind-mounted
+  # source stays untouched and both app services share a single, consistent install.
+  deps:
+    image: node:22-bookworm-slim
+    working_dir: /workspace
+    restart: "no"
+    volumes:
+      - ${BASE44_PROJECT_ROOT}:/workspace
+      - node_modules:/workspace/node_modules
+    command:
+      - sh
+      - -ec
+      - |
+        mkdir -p node_modules
+        HASH=$$(cat package.json package-lock.json 2>/dev/null | sha1sum | cut -d' ' -f1)
+        if [ "$$(cat node_modules/.deps-hash 2>/dev/null)" != "$$HASH" ]; then
+          echo "Installing dependencies…"
+          npm install --no-audit --no-fund --loglevel=error
+          echo "$$HASH" > node_modules/.deps-hash
+        else
+          echo "Dependencies already up to date."
+        fi
+
+  web:
+    image: node:22-bookworm-slim
+    working_dir: /workspace
+    restart: on-failure
+    depends_on:
+      deps:
+        condition: service_completed_successfully
+    ports:
+      - "3000:5173"
+    environment:
+      - BASE44_PREVIEW_MODE
+      - BASE44_SANDBOX_HOST_DOMAIN
+      - BASE44_PUBLIC_HOST_SUFFIX
+      - __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS
+      - CHOKIDAR_USEPOLLING=true
+    volumes:
+      - ${BASE44_PROJECT_ROOT}:/workspace
+      - node_modules:/workspace/node_modules
+    command: ["sh", "-ec", "exec ./node_modules/.bin/vite --host 0.0.0.0 --port 5173 --strictPort"]
+    labels:
+      base44.project: "Nexora Store"
+      base44.kind: "web"
+      base44.port: "3000"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e "fetch('http://127.0.0.1:5173/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  api:
+    image: node:22-bookworm-slim
+    working_dir: /workspace
+    restart: on-failure
+    depends_on:
+      deps:
+        condition: service_completed_successfully
+    environment:
+      - PORT=5000
+      - DB_PATH=/data/nexora.db
+      - NODE_ENV=development
+    env_file:
+      - ./.env.base44-defaults
+      - /run/base44/app.env
+    volumes:
+      - ${BASE44_PROJECT_ROOT}:/workspace
+      - node_modules:/workspace/node_modules
+      - dbdata:/data
+    command:
+      - sh
+      - -ec
+      - exec node --experimental-sqlite --watch server/index.js
+    labels:
+      base44.project: "Nexora API"
+      base44.kind: "api"
+      base44.port: "8000"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e "fetch('http://127.0.0.1:5000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+volumes:
+  node_modules:
+  dbdata:
